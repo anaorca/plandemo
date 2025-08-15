@@ -1,1138 +1,942 @@
-import React, { useEffect, useMemo, useState, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import {
-  BookOpen,
-  Calendar,
-  Check,
-  ChevronRight,
-  ClipboardList,
-  Download,
-  FileText,
-  HelpCircle,
-  LibraryBig,
-  Loader2,
-  Plus,
-  RefreshCw,
-  Save,
-  Search,
-  Settings,
-  Sparkles,
-  UserRound,
-  UploadCloud,
-  X,
-  AlertTriangle,
-  CheckCircle2,
-  Trash2,
-  Clock,
-  Wand2,
-  ListChecks,
-  FileBarChart2,
-  Percent,
-} from "lucide-react";
-
-// Importaciones de Firebase
-import { initializeApp } from "firebase/app";
-import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "firebase/auth";
-import { 
-  getFirestore, 
-  doc, 
-  setDoc, 
-  collection, 
-  addDoc, 
-  getDocs, 
-  serverTimestamp,
-} from "firebase/firestore";
-
-// --- Configuración de Firebase (variables globales inyectadas por el entorno) ---
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-/**
- * DEMO: Planificador de clases para docentes con Firestore (Versión con Diseño Mejorado)
- * - Paleta de color con azul como acento.
- * - Mayor espaciado en tarjetas para mejor legibilidad.
- * - Micro-interacciones en botones y elementos interactivos.
- */
-
-// --- Constantes y Datos Iniciales ---
-
-const BLOOM_LEVELS = [
-  "Recordar",
-  "Comprender",
-  "Aplicar",
-  "Analizar",
-  "Evaluar",
-  "Crear",
-];
-
-const BLOOM_VERBS: Record<string, string[]> = {
-  Recordar: ["identificar", "definir", "enumerar", "reconocer"],
-  Comprender: ["explicar", "describir", "resumir", "clasificar"],
-  Aplicar: ["resolver", "usar", "demostrar", "implementar"],
-  Analizar: ["comparar", "diferenciar", "organizar", "relacionar"],
-  Evaluar: ["justificar", "valorar", "defender", "criticar"],
-  Crear: ["diseñar", "construir", "proponer", "componer"],
-};
-
-const STRATEGIES = [
-  { id: "coop1", nombre: "Aprendizaje cooperativo (pares)", tiempo: 15, recursos: "Hojas, lápices", grupo: "pequeño" },
-  { id: "abp1", nombre: "ABP breve (mini-caso)", tiempo: 25, recursos: "Caso en PDF", grupo: "medio" },
-  { id: "deb1", nombre: "Debate relámpago", tiempo: 10, recursos: "Temas/preguntas", grupo: "grupo entero" },
-  { id: "inv1", nombre: "Exploración guiada", tiempo: 20, recursos: "Links/artículos", grupo: "parejas" },
-  { id: "est1", nombre: "Estaciones de aprendizaje", tiempo: 30, recursos: "4 mesas, materiales", grupo: "rotaciones" },
-];
-
-const DEFAULT_RUBRIC_LEVELS = ["Inicial", "Básico", "Competente", "Avanzado"];
-
-const initialPlan = () => ({
-  planId: null,
-  createdAt: serverTimestamp(),
-  updatedAt: serverTimestamp(),
-  contexto: {
-    nivel: "Secundaria",
-    grado: "7°",
-    asignatura: "Ciencias",
-    duracionMin: 60,
-    modalidad: "Presencial",
-    estudiantes: 30,
-  },
-  resultado: {
-    nivelBloom: "Aplicar",
-    contenido: "cambio de estado del agua",
-    criterio: "mediante una tabla con observaciones medibles",
-    texto: "Al finalizar la sesión, el estudiante será capaz de usar el concepto de cambio de estado del agua para explicar fenómenos cotidianos, mediante una tabla con observaciones medibles.",
-  },
-  actividades: [
-    {
-      id: "a1",
-      titulo: "Activación de saberes previos",
-      proposito: "Conectar experiencias cotidianas con el tema",
-      instrucciones: "En parejas, respondan: ¿cuándo han visto evaporación en casa? Compartan un ejemplo.",
-      tiempo: 10,
-      recursos: ["pizarrón", "marcadores"],
-      evidencia: "Lista de ideas clave sobre el estado del agua",
-    },
-  ],
-  evaluacion: {
-    instrumento: "Rúbrica",
-    criterios: [
-      {
-        id: "c1",
-        descripcion: "Explicación clara del fenómeno",
-        niveles: DEFAULT_RUBRIC_LEVELS,
-      },
-    ],
-    ponderaciones: {},
-  },
-  recursos: [
-    { id: "r1", tipo: "link", nombre: "Video corto: estados del agua", url: "https://example.com/video" },
-  ],
-  cronograma: [],
-  inclusion: {
-    adaptaciones: ["Instrucciones paso a paso", "Uso de apoyos visuales"],
-  },
-  notas: "Anotar dudas para próxima sesión",
-});
-
-const steps = [
-  { id: 1, key: "contexto", label: "Contexto", icon: <Settings className="w-4 h-4" /> },
-  { id: 2, key: "resultado", label: "Resultados", icon: <Sparkles className="w-4 h-4" /> },
-  { id: 3, key: "secuencia", label: "Secuencia didáctica", icon: <BookOpen className="w-4 h-4" /> },
-  { id: 4, key: "evaluacion", label: "Evaluación", icon: <ClipboardList className="w-4 h-4" /> },
-  { id: 5, key: "recursos", label: "Recursos", icon: <LibraryBig className="w-4 h-4" /> },
-  { id: 6, key: "cronograma", label: "Cronograma", icon: <Calendar className="w-4 h-4" /> },
-  { id: 7, key: "inclusion", label: "Inclusión", icon: <UserRound className="w-4 h-4" /> },
-  { id: 8, key: "resumen", label: "Resumen & Exportar", icon: <FileText className="w-4 h-4" /> },
-];
-
-// --- Hook para la lógica de Firestore ---
-function useFirestorePlan() {
-  const [plan, setInternalPlan] = useState(initialPlan());
-  const [db, setDb] = useState(null);
-  const [auth, setAuth] = useState(null);
-  const [userId, setUserId] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [savedPlans, setSavedPlans] = useState([]);
-  const [isSaving, setIsSaving] = useState(false);
-
-  useEffect(() => {
-    if (Object.keys(firebaseConfig).length > 0) {
-      const app = initializeApp(firebaseConfig);
-      const firestoreDb = getFirestore(app);
-      const firebaseAuth = getAuth(app);
-      setDb(firestoreDb);
-      setAuth(firebaseAuth);
-
-      const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
-        if (user) {
-          setUserId(user.uid);
-        } else {
-            if (initialAuthToken) {
-                await signInWithCustomToken(firebaseAuth, initialAuthToken);
-            } else {
-                await signInAnonymously(firebaseAuth);
-            }
-        }
-        setIsLoading(false);
-      });
-      return () => unsubscribe();
-    } else {
-      setIsLoading(false);
-    }
-  }, []);
-
-  const setPlan = useCallback((updater) => {
-    setInternalPlan(updater);
-  }, []);
-
-  const savePlan = useCallback(async () => {
-    if (!db || !userId || !plan) return;
-    setIsSaving(true);
-    const planToSave = { ...plan, updatedAt: serverTimestamp() };
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Demo: Planificador de Clases por Analítica Académica</title>
     
-    try {
-        if (plan.planId) {
-            const planRef = doc(db, `/artifacts/${appId}/users/${userId}/lesson-plans`, plan.planId);
-            await setDoc(planRef, planToSave, { merge: true });
-        } else {
-            const collectionRef = collection(db, `/artifacts/${appId}/users/${userId}/lesson-plans`);
-            const docRef = await addDoc(collectionRef, { ...planToSave, createdAt: serverTimestamp() });
-            setPlan(currentPlan => ({ ...currentPlan, planId: docRef.id }));
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React Libraries -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for JSX compilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Framer Motion for animations -->
+    <script src="https://unpkg.com/framer-motion@10.16.4/dist/framer-motion.umd.js"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide-react@0.279.0/dist/lucide-react.js"></script>
+
+    <style>
+        /* Simple style to make sure the body takes full height */
+        body {
+            font-family: 'Inter', sans-serif;
         }
-    } catch (error) {
-        console.error("Error saving plan:", error);
-    } finally {
-        setIsSaving(false);
-    }
-  }, [db, userId, plan, setPlan]);
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    </style>
+</head>
+<body class="bg-zinc-100">
+    <div id="root"></div>
 
-  const createNewPlan = () => {
-    setPlan(initialPlan());
-  };
+    <script type="text/babel">
+        // --- Destructure necessary components from global objects ---
+        const { useState, useEffect, useMemo, useCallback } = React;
+        const { motion, AnimatePresence } = FramerMotion;
+        
+        // --- Icon Setup ---
+        // Lucide-react exports icons as named exports. We create a proxy to access them.
+        const icons = lucide;
+        const {
+          BookOpen, Calendar, Check, ChevronRight, ClipboardList, Download, FileText,
+          HelpCircle, LibraryBig, Loader2, Plus, RefreshCw, Save, Search, Settings,
+          Sparkles, UserRound, UploadCloud, X, AlertTriangle, CheckCircle2, Trash2,
+          Clock, Wand2, ListChecks, FileBarChart2, Percent,
+        } = icons;
 
-  const loadPlanById = (planId) => {
-    const planToLoad = savedPlans.find(p => p.planId === planId);
-    if (planToLoad) {
-      setPlan(planToLoad);
-    }
-  };
-  
-  const fetchSavedPlans = useCallback(async () => {
-    if (!db || !userId) return;
-    const collectionRef = collection(db, `/artifacts/${appId}/users/${userId}/lesson-plans`);
-    const snapshot = await getDocs(collectionRef);
-    const plans = snapshot.docs.map(doc => ({ planId: doc.id, ...doc.data() }));
-    setSavedPlans(plans);
-  }, [db, userId]);
+        /**
+         * DEMO: Planificador de clases para docentes (Single HTML File Version)
+         * - All libraries loaded via CDN.
+         * - Uses localStorage for persistence instead of Firebase.
+         * - Maintained UI/UX improvements.
+         */
 
-  return { plan, setPlan, savePlan, isSaving, createNewPlan, loadPlanById, fetchSavedPlans, savedPlans, userId, isLoading };
-}
+        // --- Constantes y Datos Iniciales ---
+        const BLOOM_LEVELS = [
+          "Recordar", "Comprender", "Aplicar", "Analizar", "Evaluar", "Crear",
+        ];
 
-// --- Componentes de UI ---
+        const BLOOM_VERBS = {
+          Recordar: ["identificar", "definir", "enumerar", "reconocer"],
+          Comprender: ["explicar", "describir", "resumir", "clasificar"],
+          Aplicar: ["resolver", "usar", "demostrar", "implementar"],
+          Analizar: ["comparar", "diferenciar", "organizar", "relacionar"],
+          Evaluar: ["justificar", "valorar", "defender", "criticar"],
+          Crear: ["diseñar", "construir", "proponer", "componer"],
+        };
 
-function download(filename: string, data: string) {
-  const blob = new Blob([data], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
+        const STRATEGIES = [
+          { id: "coop1", nombre: "Aprendizaje cooperativo (pares)", tiempo: 15, recursos: "Hojas, lápices", grupo: "pequeño" },
+          { id: "abp1", nombre: "ABP breve (mini-caso)", tiempo: 25, recursos: "Caso en PDF", grupo: "medio" },
+          { id: "deb1", nombre: "Debate relámpago", tiempo: 10, recursos: "Temas/preguntas", grupo: "grupo entero" },
+          { id: "inv1", nombre: "Exploración guiada", tiempo: 20, recursos: "Links/artículos", grupo: "parejas" },
+          { id: "est1", nombre: "Estaciones de aprendizaje", tiempo: 30, recursos: "4 mesas, materiales", grupo: "rotaciones" },
+        ];
 
-function classNames(...s: (string | boolean | undefined)[]) {
-  return s.filter(Boolean).join(" ");
-}
+        const DEFAULT_RUBRIC_LEVELS = ["Inicial", "Básico", "Competente", "Avanzado"];
 
-function SectionCard({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) {
-  return (
-    <div className="bg-white rounded-2xl shadow-sm border p-6">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-bold text-zinc-800">{title}</h3>
-        {right}
-      </div>
-      {children}
-    </div>
-  );
-}
+        const initialPlan = () => ({
+          planId: crypto.randomUUID(),
+          contexto: {
+            nivel: "Secundaria", grado: "7°", asignatura: "Ciencias", duracionMin: 60,
+            modalidad: "Presencial", estudiantes: 30,
+          },
+          resultado: {
+            nivelBloom: "Aplicar", contenido: "cambio de estado del agua",
+            criterio: "mediante una tabla con observaciones medibles",
+            texto: "Al finalizar la sesión, el estudiante será capaz de usar el concepto de cambio de estado del agua para explicar fenómenos cotidianos, mediante una tabla con observaciones medibles.",
+          },
+          actividades: [
+            {
+              id: "a1", titulo: "Activación de saberes previos", proposito: "Conectar experiencias cotidianas con el tema",
+              instrucciones: "En parejas, respondan: ¿cuándo han visto evaporación en casa? Compartan un ejemplo.",
+              tiempo: 10, recursos: ["pizarrón", "marcadores"], evidencia: "Lista de ideas clave sobre el estado del agua",
+            },
+          ],
+          evaluacion: {
+            instrumento: "Rúbrica",
+            criterios: [{ id: "c1", descripcion: "Explicación clara del fenómeno", niveles: DEFAULT_RUBRIC_LEVELS }],
+            ponderaciones: {},
+          },
+          recursos: [{ id: "r1", tipo: "link", nombre: "Video corto: estados del agua", url: "https://example.com/video" }],
+          cronograma: [],
+          inclusion: { adaptaciones: ["Instrucciones paso a paso", "Uso de apoyos visuales"] },
+          notas: "Anotar dudas para próxima sesión",
+        });
 
-function Badge({ children, color = "gray" }: { children: React.ReactNode, color?: 'gray' | 'green' | 'amber' | 'red' }) {
-    const colors = {
-        gray: "border-zinc-200 bg-zinc-50 text-zinc-600",
-        green: "border-emerald-200 bg-emerald-50 text-emerald-700",
-        amber: "border-amber-300 bg-amber-50 text-amber-800",
-        red: "border-red-300 bg-red-50 text-red-800",
-    }
-  return (
-    <span className={classNames("inline-flex items-center gap-1.5 text-xs font-medium rounded-full border px-2.5 py-1", colors[color])}>
-      {children}
-    </span>
-  );
-}
+        const steps = [
+          { id: 1, key: "contexto", label: "Contexto", icon: <Settings className="w-4 h-4" /> },
+          { id: 2, key: "resultado", label: "Resultados", icon: <Sparkles className="w-4 h-4" /> },
+          { id: 3, key: "secuencia", label: "Secuencia didáctica", icon: <BookOpen className="w-4 h-4" /> },
+          { id: 4, key: "evaluacion", label: "Evaluación", icon: <ClipboardList className="w-4 h-4" /> },
+          { id: 5, key: "recursos", label: "Recursos", icon: <LibraryBig className="w-4 h-4" /> },
+          { id: 6, key: "cronograma", label: "Cronograma", icon: <Calendar className="w-4 h-4" /> },
+          { id: 7, key: "inclusion", label: "Inclusión", icon: <UserRound className="w-4 h-4" /> },
+          { id: 8, key: "resumen", label: "Resumen & Exportar", icon: <FileText className="w-4 h-4" /> },
+        ];
 
-function ProgressPill({ done, label }: { done: boolean; label: string }) {
-  return (
-    <div className={classNames("flex items-center gap-2 px-3 py-2 rounded-xl border", done && "bg-emerald-50 border-emerald-200")}>
-      <div className={classNames("w-2 h-2 rounded-full", done ? "bg-emerald-500" : "bg-zinc-300")} />
-      <span className="text-sm">{label}</span>
-    </div>
-  );
-}
+        // --- Hook para la lógica de localStorage ---
+        function useLocalPlan() {
+          const [plan, setPlan] = useState(() => {
+            try {
+                const saved = localStorage.getItem("lesson-planner-demo");
+                return saved ? JSON.parse(saved) : initialPlan();
+            } catch (e) {
+                console.error("Failed to parse saved plan, starting fresh.");
+                return initialPlan();
+            }
+          });
 
-function TourModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const slides = [
-    { title: "Bienvenida", text: "Completa los pasos del lateral y obtén un plan listo para imprimir en minutos." },
-    { title: "Resultados claros", text: "Usa Bloom para redactar objetivos observables y medibles." },
-    { title: "Asistente de Planificación (Demo)", text: "Explora el panel derecho para ver futuras herramientas de IA y checklists de calidad que estamos desarrollando." },
-    { title: "Guarda y exporta", text: "Guarda tu progreso en la nube y descarga JSON o imprime una versión limpia." },
-  ];
-  const [i, setI] = useState(0);
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <motion.div
-        onClick={(e) => e.stopPropagation()}
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, y: 16 }}
-        className="bg-white w-full max-w-lg rounded-2xl shadow-xl p-6"
-      >
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-xl font-semibold">Tour rápido</h2>
-          <button onClick={onClose} className="p-2 rounded-lg hover:bg-zinc-100" aria-label="Cerrar">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-        <div className="min-h-[120px]">
-          <h3 className="text-lg font-medium mb-1">{slides[i].title}</h3>
-          <p className="text-zinc-600">{slides[i].text}</p>
-        </div>
-        <div className="flex items-center justify-between mt-6">
-          <button
-            onClick={() => setI((x) => Math.max(0, x - 1))}
-            className="px-3 py-2 rounded-xl border hover:bg-zinc-50"
-          >
-            Atrás
-          </button>
-          <div className="text-sm text-zinc-500">{i + 1} / {slides.length}</div>
-          {i < slides.length - 1 ? (
-            <button
-              onClick={() => setI((x) => Math.min(slides.length - 1, x + 1))}
-              className="px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700"
-            >
-              Siguiente
-            </button>
-          ) : (
-            <button onClick={onClose} className="px-3 py-2 rounded-xl bg-emerald-600 text-white hover:opacity-90">
-              ¡Listo!
-            </button>
-          )}
-        </div>
-      </motion.div>
-    </div>
-  );
-}
+          useEffect(() => {
+            localStorage.setItem("lesson-planner-demo", JSON.stringify(plan));
+          }, [plan]);
 
-function LoadPlanModal({ open, onClose, plans, onSelect }) {
-    if (!open) return null;
+          return { plan, setPlan };
+        }
 
-    return (
-        <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
-            <motion.div
+        // --- Componentes de UI ---
+        function download(filename, data) {
+          const blob = new Blob([data], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = filename;
+          a.click();
+          URL.revokeObjectURL(url);
+        }
+
+        function classNames(...s) {
+          return s.filter(Boolean).join(" ");
+        }
+
+        function SectionCard({ title, children, right }) {
+          return (
+            <div className="bg-white rounded-2xl shadow-sm border p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-bold text-zinc-800">{title}</h3>
+                {right}
+              </div>
+              {children}
+            </div>
+          );
+        }
+
+        function Badge({ children, color = "gray" }) {
+            const colors = {
+                gray: "border-zinc-200 bg-zinc-50 text-zinc-600",
+                green: "border-emerald-200 bg-emerald-50 text-emerald-700",
+                amber: "border-amber-300 bg-amber-50 text-amber-800",
+                red: "border-red-300 bg-red-50 text-red-800",
+            };
+          return (
+            <span className={classNames("inline-flex items-center gap-1.5 text-xs font-medium rounded-full border px-2.5 py-1", colors[color])}>
+              {children}
+            </span>
+          );
+        }
+
+        function ProgressPill({ done, label }) {
+          return (
+            <div className={classNames("flex items-center gap-2 px-3 py-2 rounded-xl border", done && "bg-emerald-50 border-emerald-200")}>
+              <div className={classNames("w-2 h-2 rounded-full", done ? "bg-emerald-500" : "bg-zinc-300")} />
+              <span className="text-sm">{label}</span>
+            </div>
+          );
+        }
+
+        function TourModal({ open, onClose }) {
+          const slides = [
+            { title: "Bienvenida", text: "Completa los pasos del lateral y obtén un plan listo para imprimir en minutos." },
+            { title: "Resultados claros", text: "Usa Bloom para redactar objetivos observables y medibles." },
+            { title: "Asistente de Planificación (Demo)", text: "Explora el panel derecho para ver futuras herramientas de IA y checklists de calidad que estamos desarrollando." },
+            { title: "Guarda y exporta", text: "Guarda tu progreso en la nube y descarga JSON o imprime una versión limpia." },
+          ];
+          const [i, setI] = useState(0);
+          if (!open) return null;
+          return (
+            <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
+              <motion.div
                 onClick={(e) => e.stopPropagation()}
                 initial={{ opacity: 0, y: 16 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: 16 }}
-                className="bg-white w-full max-w-2xl rounded-2xl shadow-xl p-6"
-            >
-                <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-xl font-semibold">Cargar plan de clase</h2>
-                    <button onClick={onClose} className="p-2 rounded-lg hover:bg-zinc-100" aria-label="Cerrar">
-                        <X className="w-5 h-5" />
-                    </button>
+                className="bg-white w-full max-w-lg rounded-2xl shadow-xl p-6"
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <h2 className="text-xl font-semibold">Tour rápido</h2>
+                  <button onClick={onClose} className="p-2 rounded-lg hover:bg-zinc-100" aria-label="Cerrar">
+                    <X className="w-5 h-5" />
+                  </button>
                 </div>
-                <div className="max-h-[60vh] overflow-y-auto space-y-2">
-                    {plans.length > 0 ? (
-                        plans.map(p => (
-                            <button 
-                                key={p.planId} 
-                                onClick={() => { onSelect(p.planId); onClose(); }}
-                                className="w-full text-left p-4 rounded-xl border hover:bg-zinc-50 hover:shadow-sm transition-all"
-                            >
-                                <div className="font-medium">{p.contexto?.asignatura || 'Plan sin título'} - {p.contexto?.grado || ''}</div>
-                                <div className="text-sm text-zinc-500">
-                                    Última modificación: {p.updatedAt?.toDate().toLocaleString() || 'Fecha no disponible'}
-                                </div>
-                            </button>
-                        ))
-                    ) : (
-                        <div className="text-center text-zinc-500 py-8">
-                            No tienes planes guardados.
-                        </div>
-                    )}
+                <div className="min-h-[120px]">
+                  <h3 className="text-lg font-medium mb-1">{slides[i].title}</h3>
+                  <p className="text-zinc-600">{slides[i].text}</p>
                 </div>
-            </motion.div>
-        </div>
-    );
-}
-
-// --- Panel Derecho de Demostración ---
-function RightDemoPanel() {
-  return (
-    <div className="h-full flex flex-col gap-3">
-      <div className="bg-white rounded-2xl shadow-sm border p-4 opacity-70">
-        <h3 className="font-semibold mb-2 flex items-center gap-2"><Wand2 className="w-4 h-4"/> Asistente de Planificación (Próximamente)</h3>
-        <p className="text-sm text-zinc-600 mb-3">
-            Imagina pedirle que "sugiera 3 actividades" y que aparezcan al instante en tu secuencia.
-        </p>
-        <div className="flex gap-2">
-          <input
-            disabled
-            placeholder="Ej.: 'Crea una rúbrica para evaluar...'"
-            className="flex-1 rounded-xl border px-3 py-2 bg-zinc-100 cursor-not-allowed"
-          />
-          <button disabled className="px-3 py-2 rounded-xl bg-zinc-300 text-white cursor-not-allowed">Enviar</button>
-        </div>
-      </div>
-
-      <div className="bg-white rounded-2xl shadow-sm border p-4 opacity-70">
-        <h3 className="font-semibold mb-2 flex items-center gap-2"><ListChecks className="w-4 h-4"/> Checklist de Calidad (Demo)</h3>
-        <ul className="text-sm space-y-2 text-zinc-600">
-          <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-500"/> Objetivo observable</li>
-          <li className="flex items-center gap-2"><AlertTriangle className="w-4 h-4 text-amber-500"/> Evidencias alineadas</li>
-          <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-500"/> Tiempos consistentes</li>
-          <li className="flex items-center gap-2"><X className="w-4 h-4 text-red-500"/> Adaptaciones de inclusión</li>
-        </ul>
-         <p className="text-xs text-zinc-500 mt-3">
-            Esta sección analizará automáticamente tu plan y te dará retroalimentación.
-        </p>
-      </div>
-      
-      <div className="bg-white rounded-2xl shadow-sm border p-4 opacity-70">
-        <h3 className="font-semibold mb-2 flex items-center gap-2"><Percent className="w-4 h-4"/> Ponderación de Rúbrica (Demo)</h3>
-         <p className="text-sm text-zinc-600 mb-3">
-            Asigna porcentajes a tus criterios de evaluación y asegúrate de que sumen 100%.
-        </p>
-        <button disabled className="w-full px-3 py-2 rounded-xl border bg-zinc-100 cursor-not-allowed">Añadir ponderaciones</button>
-      </div>
-
-       <div className="bg-white rounded-2xl shadow-sm border p-4 opacity-70">
-        <h3 className="font-semibold mb-2 flex items-center gap-2"><FileBarChart2 className="w-4 h-4"/> Exportaciones Avanzadas (Demo)</h3>
-         <p className="text-sm text-zinc-600 mb-3">
-            Genera un documento PDF o Word con formato institucional, listo para entregar.
-        </p>
-        <button disabled className="w-full px-3 py-2 rounded-xl border bg-zinc-100 cursor-not-allowed">Exportar a Word</button>
-      </div>
-    </div>
-  );
-}
-
-
-// --- Componente Principal ---
-export default function LessonPlannerDemo() {
-  const { plan, setPlan, savePlan, isSaving, createNewPlan, loadPlanById, fetchSavedPlans, savedPlans, isLoading } = useFirestorePlan();
-  const [current, setCurrent] = useState(1);
-  const [showTour, setShowTour] = useState(false);
-  const [showLoadModal, setShowLoadModal] = useState(false);
-  const [query, setQuery] = useState("");
-
-  const progress = useMemo(() => {
-    const a = !!plan.contexto?.asignatura && !!plan.contexto?.duracionMin;
-    const b = !!plan.resultado?.texto && !!plan.resultado?.nivelBloom;
-    const c = (plan.actividades?.length || 0) > 0;
-    const d = (plan.evaluacion?.criterios?.length || 0) > 0;
-    return { a, b, c, d };
-  }, [plan]);
-
-  function handleResetPlan() {
-    createNewPlan();
-    setCurrent(1);
-  }
-
-  function handleOpenLoadModal() {
-    fetchSavedPlans();
-    setShowLoadModal(true);
-  }
-
-  function exportJSON() {
-    download(`plan-${plan.planId || 'nuevo'}.json`, JSON.stringify(plan, null, 2));
-  }
-
-  function filteredStrategies() {
-    const q = query.toLowerCase();
-    if (!q) return STRATEGIES;
-    return STRATEGIES.filter((s) => s.nombre.toLowerCase().includes(q) || s.recursos.toLowerCase().includes(q));
-  }
-
-  if (isLoading) {
-    return (
-        <div className="min-h-screen bg-zinc-100 flex items-center justify-center">
-            <Loader2 className="w-12 h-12 animate-spin text-blue-500" />
-        </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-zinc-100 text-zinc-800">
-      {/* Topbar */}
-      <div className="sticky top-0 z-40 bg-white/80 backdrop-blur border-b">
-        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3">
-          <div className="flex items-center gap-2 font-bold text-zinc-800">
-            <div className="w-8 h-8 rounded-xl bg-blue-600 text-white grid place-items-center font-bold">AA</div>
-            <div>
-              <div className="leading-4">Planificador de Clases</div>
-              <div className="text-xs text-zinc-500 font-normal">Demo por Analítica Académica</div>
-            </div>
-          </div>
-          <div className="flex-1 max-w-xl relative">
-            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400"/>
-            <input placeholder="Buscar plantillas, actividades o recursos" className="w-full border rounded-xl pl-9 pr-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"/>
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={handleResetPlan} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 flex items-center gap-2 transition-colors"><RefreshCw className="w-4 h-4"/> Nuevo</button>
-            <button onClick={handleOpenLoadModal} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 flex items-center gap-2 transition-colors"><UploadCloud className="w-4 h-4"/> Cargar</button>
-            <button onClick={savePlan} disabled={isSaving} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 flex items-center gap-2 disabled:opacity-50 transition-colors">
-                {isSaving ? <Loader2 className="w-4 h-4 animate-spin"/> : <Save className="w-4 h-4"/>} Guardar
-            </button>
-            <button onClick={exportJSON} className="px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 flex items-center gap-2 transition-colors"><Download className="w-4 h-4"/> Exportar</button>
-            <button onClick={() => setShowTour(true)} className="p-2 rounded-xl border bg-white hover:bg-zinc-50 flex items-center gap-2 transition-colors"><HelpCircle className="w-5 h-5"/></button>
-          </div>
-        </div>
-      </div>
-
-      {/* Body */}
-      <div className="max-w-7xl mx-auto px-4 py-6 grid grid-cols-1 lg:grid-cols-[260px_1fr_320px] gap-6">
-        {/* Sidebar Steps */}
-        <aside className="space-y-4">
-          <div className="bg-white rounded-2xl shadow-sm border p-3">
-            <div className="text-xs text-zinc-500 mb-2 px-2">Pasos</div>
-            <div className="space-y-1">
-              {steps.map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => setCurrent(s.id)}
-                  className={classNames(
-                    "w-full flex items-center gap-2 px-3 py-2 rounded-xl text-left transition-all duration-200",
-                    current === s.id ? "bg-blue-50 text-blue-700 font-semibold" : "hover:bg-zinc-50"
+                <div className="flex items-center justify-between mt-6">
+                  <button onClick={() => setI((x) => Math.max(0, x - 1))} className="px-3 py-2 rounded-xl border hover:bg-zinc-50">Atrás</button>
+                  <div className="text-sm text-zinc-500">{i + 1} / {slides.length}</div>
+                  {i < slides.length - 1 ? (
+                    <button onClick={() => setI((x) => Math.min(slides.length - 1, x + 1))} className="px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700">Siguiente</button>
+                  ) : (
+                    <button onClick={onClose} className="px-3 py-2 rounded-xl bg-emerald-600 text-white hover:opacity-90">¡Listo!</button>
                   )}
-                >
-                  <span className="opacity-70">{s.icon}</span>
-                  <span className="text-sm">{s.label}</span>
-                  {current === s.id && <ChevronRight className="ml-auto w-4 h-4"/>}
-                </button>
-              ))}
+                </div>
+              </motion.div>
             </div>
-          </div>
+          );
+        }
 
-          <div className="bg-white rounded-2xl shadow-sm border p-3">
-            <div className="text-xs text-zinc-500 mb-2">Progreso</div>
-            <div className="space-y-2">
-              <ProgressPill done={progress.a} label="Contexto completo"/>
-              <ProgressPill done={progress.b} label="Objetivo claro"/>
-              <ProgressPill done={progress.c} label="Actividades listas"/>
-              <ProgressPill done={progress.d} label="Evaluación alineada"/>
+        // --- Panel Derecho de Demostración ---
+        function RightDemoPanel() {
+          return (
+            <div className="h-full flex flex-col gap-3">
+              <div className="bg-white rounded-2xl shadow-sm border p-4 opacity-70">
+                <h3 className="font-semibold mb-2 flex items-center gap-2"><Wand2 className="w-4 h-4"/> Asistente de Planificación (Próximamente)</h3>
+                <p className="text-sm text-zinc-600 mb-3">
+                    Imagina pedirle que "sugiera 3 actividades" y que aparezcan al instante en tu secuencia.
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    disabled
+                    placeholder="Ej.: 'Crea una rúbrica para evaluar...'"
+                    className="flex-1 rounded-xl border px-3 py-2 bg-zinc-100 cursor-not-allowed"
+                  />
+                  <button disabled className="px-3 py-2 rounded-xl bg-zinc-300 text-white cursor-not-allowed">Enviar</button>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-2xl shadow-sm border p-4 opacity-70">
+                <h3 className="font-semibold mb-2 flex items-center gap-2"><ListChecks className="w-4 h-4"/> Checklist de Calidad (Demo)</h3>
+                <ul className="text-sm space-y-2 text-zinc-600">
+                  <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-500"/> Objetivo observable</li>
+                  <li className="flex items-center gap-2"><AlertTriangle className="w-4 h-4 text-amber-500"/> Evidencias alineadas</li>
+                  <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-emerald-500"/> Tiempos consistentes</li>
+                  <li className="flex items-center gap-2"><X className="w-4 h-4 text-red-500"/> Adaptaciones de inclusión</li>
+                </ul>
+                 <p className="text-xs text-zinc-500 mt-3">
+                    Esta sección analizará automáticamente tu plan y te dará retroalimentación.
+                </p>
+              </div>
+              
+              <div className="bg-white rounded-2xl shadow-sm border p-4 opacity-70">
+                <h3 className="font-semibold mb-2 flex items-center gap-2"><Percent className="w-4 h-4"/> Ponderación de Rúbrica (Demo)</h3>
+                 <p className="text-sm text-zinc-600 mb-3">
+                    Asigna porcentajes a tus criterios de evaluación y asegúrate de que sumen 100%.
+                </p>
+                <button disabled className="w-full px-3 py-2 rounded-xl border bg-zinc-100 cursor-not-allowed">Añadir ponderaciones</button>
+              </div>
+
+               <div className="bg-white rounded-2xl shadow-sm border p-4 opacity-70">
+                <h3 className="font-semibold mb-2 flex items-center gap-2"><FileBarChart2 className="w-4 h-4"/> Exportaciones Avanzadas (Demo)</h3>
+                 <p className="text-sm text-zinc-600 mb-3">
+                    Genera un documento PDF o Word con formato institucional, listo para entregar.
+                </p>
+                <button disabled className="w-full px-3 py-2 rounded-xl border bg-zinc-100 cursor-not-allowed">Exportar a Word</button>
+              </div>
             </div>
-          </div>
-        </aside>
+          );
+        }
 
-        {/* Main Canvas */}
-        <main className="space-y-4">
-          {current === 1 && <ContextForm plan={plan} setPlan={setPlan} />}
-          {current === 2 && <ResultadosForm plan={plan} setPlan={setPlan} />}
-          {current === 3 && (
-            <div className="space-y-4">
-               <TimeValidatorBanner plan={plan} setPlan={setPlan} />
-              <SectionCard title="Banco de estrategias (clic para añadir)" right={
-                <div className="flex items-center gap-2">
-                  <div className="relative">
+        // --- Componente Principal ---
+        function LessonPlannerDemo() {
+          const { plan, setPlan } = useLocalPlan();
+          const [current, setCurrent] = useState(1);
+          const [showTour, setShowTour] = useState(false);
+          const [query, setQuery] = useState("");
+
+          const progress = useMemo(() => {
+            const a = !!plan.contexto?.asignatura && !!plan.contexto?.duracionMin;
+            const b = !!plan.resultado?.texto && !!plan.resultado?.nivelBloom;
+            const c = (plan.actividades?.length || 0) > 0;
+            const d = (plan.evaluacion?.criterios?.length || 0) > 0;
+            return { a, b, c, d };
+          }, [plan]);
+
+          function handleResetPlan() {
+            if (confirm("¿Estás seguro de que quieres empezar un plan nuevo? Se perderán los cambios no guardados.")) {
+                setPlan(initialPlan());
+                setCurrent(1);
+            }
+          }
+
+          function handleSavePlan() {
+            localStorage.setItem("lesson-planner-demo", JSON.stringify(plan));
+            alert("¡Plan guardado localmente!");
+          }
+
+          function handleLoadPlan() {
+            const savedPlan = localStorage.getItem("lesson-planner-demo");
+            if (savedPlan) {
+                setPlan(JSON.parse(savedPlan));
+            } else {
+                alert("No se encontró ningún plan guardado.");
+            }
+          }
+
+          function exportJSON() {
+            download(`plan-${plan.planId}.json`, JSON.stringify(plan, null, 2));
+          }
+
+          function filteredStrategies() {
+            const q = query.toLowerCase();
+            if (!q) return STRATEGIES;
+            return STRATEGIES.filter((s) => s.nombre.toLowerCase().includes(q) || s.recursos.toLowerCase().includes(q));
+          }
+
+          return (
+            <div className="min-h-screen bg-zinc-100 text-zinc-800">
+              {/* Topbar */}
+              <div className="sticky top-0 z-40 bg-white/80 backdrop-blur border-b">
+                <div className="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3">
+                  <div className="flex items-center gap-2 font-bold text-zinc-800">
+                    <div className="w-8 h-8 rounded-xl bg-blue-600 text-white grid place-items-center font-bold">AA</div>
+                    <div>
+                      <div className="leading-4">Planificador de Clases</div>
+                      <div className="text-xs text-zinc-500 font-normal">Demo por Analítica Académica</div>
+                    </div>
+                  </div>
+                  <div className="flex-1 max-w-xl relative">
                     <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400"/>
-                    <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar…" className="pl-9 pr-3 py-2 rounded-xl border focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+                    <input placeholder="Buscar plantillas, actividades o recursos" className="w-full border rounded-xl pl-9 pr-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={handleResetPlan} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 flex items-center gap-2 transition-colors"><RefreshCw className="w-4 h-4"/> Nuevo</button>
+                    <button onClick={handleLoadPlan} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 flex items-center gap-2 transition-colors"><UploadCloud className="w-4 h-4"/> Cargar</button>
+                    <button onClick={handleSavePlan} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 flex items-center gap-2 transition-colors"><Save className="w-4 h-4"/> Guardar</button>
+                    <button onClick={exportJSON} className="px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 flex items-center gap-2 transition-colors"><Download className="w-4 h-4"/> Exportar</button>
+                    <button onClick={() => setShowTour(true)} className="p-2 rounded-xl border bg-white hover:bg-zinc-50 flex items-center gap-2 transition-colors"><HelpCircle className="w-5 h-5"/></button>
                   </div>
                 </div>
-              }>
-                <div className="grid sm:grid-cols-2 gap-3">
-                  {filteredStrategies().map((s) => (
-                    <motion.button 
-                        key={s.id} 
-                        onClick={() => addStrategyToActivities(s, setPlan)} 
-                        className="text-left p-4 rounded-2xl border hover:shadow-md hover:border-blue-500"
-                        whileHover={{ scale: 1.03 }}
-                        transition={{ duration: 0.2 }}
-                    >
-                      <div className="font-medium text-zinc-800">{s.nombre}</div>
-                      <div className="text-xs text-zinc-500 mt-1">Tiempo: {s.tiempo} min • Recursos: {s.recursos}</div>
-                    </motion.button>
-                  ))}
-                </div>
-              </SectionCard>
+              </div>
 
-              <ActividadesEditor plan={plan} setPlan={setPlan} />
+              {/* Body */}
+              <div className="max-w-7xl mx-auto px-4 py-6 grid grid-cols-1 lg:grid-cols-[260px_1fr_320px] gap-6">
+                {/* Sidebar Steps */}
+                <aside className="space-y-4">
+                  <div className="bg-white rounded-2xl shadow-sm border p-3">
+                    <div className="text-xs text-zinc-500 mb-2 px-2">Pasos</div>
+                    <div className="space-y-1">
+                      {steps.map((s) => (
+                        <button
+                          key={s.id}
+                          onClick={() => setCurrent(s.id)}
+                          className={classNames(
+                            "w-full flex items-center gap-2 px-3 py-2 rounded-xl text-left transition-all duration-200",
+                            current === s.id ? "bg-blue-50 text-blue-700 font-semibold" : "hover:bg-zinc-50"
+                          )}
+                        >
+                          <span className="opacity-70">{s.icon}</span>
+                          <span className="text-sm">{s.label}</span>
+                          {current === s.id && <ChevronRight className="ml-auto w-4 h-4"/>}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="bg-white rounded-2xl shadow-sm border p-3">
+                    <div className="text-xs text-zinc-500 mb-2">Progreso</div>
+                    <div className="space-y-2">
+                      <ProgressPill done={progress.a} label="Contexto completo"/>
+                      <ProgressPill done={progress.b} label="Objetivo claro"/>
+                      <ProgressPill done={progress.c} label="Actividades listas"/>
+                      <ProgressPill done={progress.d} label="Evaluación alineada"/>
+                    </div>
+                  </div>
+                </aside>
+
+                {/* Main Canvas */}
+                <main className="space-y-4">
+                  {current === 1 && <ContextForm plan={plan} setPlan={setPlan} />}
+                  {current === 2 && <ResultadosForm plan={plan} setPlan={setPlan} />}
+                  {current === 3 && (
+                    <div className="space-y-4">
+                       <TimeValidatorBanner plan={plan} setPlan={setPlan} />
+                      <SectionCard title="Banco de estrategias (clic para añadir)" right={
+                        <div className="flex items-center gap-2">
+                          <div className="relative">
+                            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400"/>
+                            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar…" className="pl-9 pr-3 py-2 rounded-xl border focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+                          </div>
+                        </div>
+                      }>
+                        <div className="grid sm:grid-cols-2 gap-3">
+                          {filteredStrategies().map((s) => (
+                            <motion.button 
+                                key={s.id} 
+                                onClick={() => addStrategyToActivities(s, setPlan)} 
+                                className="text-left p-4 rounded-2xl border hover:shadow-md hover:border-blue-500"
+                                whileHover={{ scale: 1.03 }}
+                                transition={{ duration: 0.2 }}
+                            >
+                              <div className="font-medium text-zinc-800">{s.nombre}</div>
+                              <div className="text-xs text-zinc-500 mt-1">Tiempo: {s.tiempo} min • Recursos: {s.recursos}</div>
+                            </motion.button>
+                          ))}
+                        </div>
+                      </SectionCard>
+                      <ActividadesEditor plan={plan} setPlan={setPlan} />
+                    </div>
+                  )}
+                  {current === 4 && <EvaluacionForm plan={plan} setPlan={setPlan} />}
+                  {current === 5 && <RecursosForm plan={plan} setPlan={setPlan} />}
+                  {current === 6 && <CronogramaForm plan={plan} setPlan={setPlan} />}
+                  {current === 7 && <InclusionForm plan={plan} setPlan={setPlan} />}
+                  {current === 8 && <ResumenExport plan={plan} onExport={exportJSON} />}
+                </main>
+                
+                {/* Right Demo Panel */}
+                <aside>
+                    <RightDemoPanel />
+                </aside>
+              </div>
+              
+              <footer className="text-center py-6 text-sm text-zinc-500">
+                <p>Este es un demo interactivo creado por <strong>Analítica Académica</strong>.</p>
+                <p>Para más información, contáctanos en <a href="mailto:contacto@analiticaacademica.com" className="text-blue-600 hover:underline">contacto@analiticaacademica.com</a>.</p>
+              </footer>
+
+              <TourModal open={showTour} onClose={() => setShowTour(false)} />
             </div>
-          )}
-          {current === 4 && <EvaluacionForm plan={plan} setPlan={setPlan} />}
-          {current === 5 && <RecursosForm plan={plan} setPlan={setPlan} />}
-          {current === 6 && <CronogramaForm plan={plan} setPlan={setPlan} />}
-          {current === 7 && <InclusionForm plan={plan} setPlan={setPlan} />}
-          {current === 8 && <ResumenExport plan={plan} onExport={exportJSON} />}
-        </main>
-        
-        {/* Right Demo Panel */}
-        <aside>
-            <RightDemoPanel />
-        </aside>
-      </div>
-      
-      <footer className="text-center py-6 text-sm text-zinc-500">
-        <p>Este es un demo interactivo creado por <strong>Analítica Académica</strong>.</p>
-        <p>Para más información, contáctanos en <a href="mailto:contacto@analiticaacademica.com" className="text-blue-600 hover:underline">contacto@analiticaacademica.com</a>.</p>
-      </footer>
+          );
+        }
 
-      <TourModal open={showTour} onClose={() => setShowTour(false)} />
-      <LoadPlanModal open={showLoadModal} onClose={() => setShowLoadModal(false)} plans={savedPlans} onSelect={loadPlanById} />
-    </div>
-  );
-}
-
-// --- Formularios y componentes mejorados ---
-
-function ContextForm({ plan, setPlan }: { plan: any; setPlan: (fn: any) => void }) {
-  const handleChange = (field, value) => {
-    setPlan(p => ({ ...p, contexto: { ...p.contexto, [field]: value } }));
-  };
-  return (
-    <SectionCard title="1) Contexto">
-      <div className="grid md:grid-cols-3 gap-4">
-        <div>
-          <label className="text-sm font-medium text-zinc-600">Nivel educativo</label>
-          <select
-            value={plan.contexto.nivel}
-            onChange={(e) => handleChange('nivel', e.target.value)}
-            className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-          >
-            {['Inicial','Primaria','Secundaria','Superior'].map((n) => <option key={n}>{n}</option>)}
-          </select>
-        </div>
-        <div>
-          <label className="text-sm font-medium text-zinc-600">Grado/curso</label>
-          <input
-            value={plan.contexto.grado}
-            onChange={(e) => handleChange('grado', e.target.value)}
-            className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-          />
-        </div>
-        <div>
-          <label className="text-sm font-medium text-zinc-600">Asignatura</label>
-          <input
-            value={plan.contexto.asignatura}
-            onChange={(e) => handleChange('asignatura', e.target.value)}
-            className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-          />
-        </div>
-        <div>
-          <label className="text-sm font-medium text-zinc-600">Duración (minutos)</label>
-          <input
-            type="number"
-            min={10}
-            value={plan.contexto.duracionMin}
-            onChange={(e) => handleChange('duracionMin', Number(e.target.value))}
-            className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-          />
-        </div>
-        <div>
-          <label className="text-sm font-medium text-zinc-600">Modalidad</label>
-          <select
-            value={plan.contexto.modalidad}
-            onChange={(e) => handleChange('modalidad', e.target.value)}
-            className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-          >
-            {['Presencial','Virtual','Mixta'].map((n) => <option key={n}>{n}</option>)}
-          </select>
-        </div>
-        <div>
-          <label className="text-sm font-medium text-zinc-600">N° estudiantes</label>
-          <input
-            type="number"
-            min={1}
-            value={plan.contexto.estudiantes}
-            onChange={(e) => handleChange('estudiantes', Number(e.target.value))}
-            className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-          />
-        </div>
-      </div>
-    </SectionCard>
-  );
-}
-
-function ResultadosForm({ plan, setPlan }: { plan: any; setPlan: (fn: any) => void }) {
-  const [verbo, setVerbo] = useState("");
-  useEffect(() => {
-    const verbs = BLOOM_VERBS[plan.resultado.nivelBloom] || [];
-    setVerbo(verbs[0] || "");
-  }, [plan.resultado.nivelBloom]);
-
-  const handleChange = (field, value) => {
-    setPlan(p => ({ ...p, resultado: { ...p.resultado, [field]: value } }));
-  };
-
-  function generar() {
-    const v = verbo || (BLOOM_VERBS[plan.resultado.nivelBloom]?.[0] ?? "aplicar");
-    const c = plan.resultado.contenido || "contenido";
-    const criterio = plan.resultado.criterio || "mediante evidencia observable";
-    const texto = `Al finalizar la sesión, el estudiante será capaz de ${v} ${c} en situaciones propias del nivel, ${criterio}.`;
-    handleChange('texto', texto);
-  }
-
-  return (
-    <div className="space-y-4">
-      <SectionCard title="2) Resultado de aprendizaje" right={<Badge>Bloom + criterio</Badge>}>
-        <div className="grid md:grid-cols-3 gap-4">
-           <div>
-            <label className="text-sm font-medium text-zinc-600">Nivel Bloom</label>
-            <select
-              value={plan.resultado.nivelBloom}
-              onChange={(e) => handleChange('nivelBloom', e.target.value)}
-              className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-            >
-              {BLOOM_LEVELS.map((n) => <option key={n}>{n}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="text-sm font-medium text-zinc-600">Verbo sugerido</label>
-            <select value={verbo} onChange={(e) => setVerbo(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none">
-              {(BLOOM_VERBS[plan.resultado.nivelBloom] || []).map((v) => <option key={v}>{v}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="text-sm font-medium text-zinc-600">Contenido/tema</label>
-            <input
-              value={plan.resultado.contenido}
-              onChange={(e) => handleChange('contenido', e.target.value)}
-              className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-              placeholder="p. ej., fracciones, fotosíntesis"
-            />
-          </div>
-          <div className="md:col-span-3">
-            <label className="text-sm font-medium text-zinc-600">Criterio de logro (observable y medible)</label>
-            <input
-              value={plan.resultado.criterio}
-              onChange={(e) => handleChange('criterio', e.target.value)}
-              className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-              placeholder="p. ej., alcanzando nivel competente en la rúbrica"
-            />
-          </div>
-          <div className="md:col-span-3">
-            <label className="text-sm font-medium text-zinc-600">Resultado (auto-generado o manual)</label>
-            <textarea
-              value={plan.resultado.texto}
-              onChange={(e) => handleChange('texto', e.target.value)}
-              className="mt-1 w-full rounded-2xl border px-3 py-2 min-h-[100px] focus:ring-2 focus:ring-blue-500 focus:outline-none"
-            />
-             <p className="text-xs text-zinc-500 mt-1">
-                Sugerencia: Usa un verbo de Bloom y concreta la evidencia: ‘… alcanzando nivel competente en la rúbrica’.
-            </p>
-          </div>
-        </div>
-        <div className="mt-3 flex gap-2">
-          <button onClick={generar} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 flex items-center gap-2 transition-colors"><Sparkles className="w-4 h-4"/> Generar</button>
-        </div>
-      </SectionCard>
-    </div>
-  );
-}
-
-function addStrategyToActivities(s: any, setPlan: any) {
-  const activity = {
-    id: crypto.randomUUID(),
-    titulo: s.nombre,
-    proposito: "Lograr participación activa y práctica guiada",
-    instrucciones: `Organiza en ${s.grupo}. Explica pasos y asigna roles.`,
-    tiempo: s.tiempo,
-    recursos: [s.recursos],
-    evidencia: "Producto breve / Observación",
-  };
-  setPlan((p: any) => ({ ...p, actividades: [...p.actividades, activity] }));
-}
-
-// --- Semáforo de Alineamiento ---
-function checkAlignment(resultadoTexto, evidenciaTexto) {
-    if (!resultadoTexto || !evidenciaTexto) return { status: 'review', tooltip: 'Falta información para verificar.' };
-
-    const stopWords = new Set(['de', 'la', 'el', 'en', 'y', 'o', 'un', 'una', 'con', 'por', 'para', 'ser', 'capaz']);
-    const getKeywords = (text) => 
-        text.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/).filter(w => w && !stopWords.has(w));
-    
-    const resultadoKeywords = new Set(getKeywords(resultadoTexto));
-    const evidenciaKeywords = getKeywords(evidenciaTexto);
-
-    if (resultadoKeywords.size === 0) return { status: 'review', tooltip: 'El resultado de aprendizaje es muy genérico.' };
-
-    const matchCount = evidenciaKeywords.filter(kw => resultadoKeywords.has(kw)).length;
-    const score = matchCount / evidenciaKeywords.length;
-
-    if (score > 0.3) return { status: 'aligned', tooltip: 'La evidencia parece alineada con el resultado.' };
-    if (score > 0.1) return { status: 'review', tooltip: 'La evidencia podría no estar completamente alineada. Revisa las palabras clave.' };
-    return { status: 'unaligned', tooltip: 'La evidencia no parece alineada. Asegúrate que mida el resultado de aprendizaje.' };
-}
-
-function AlignmentBadge({ status, tooltip }) {
-    const config = {
-        aligned: { color: 'green', icon: <CheckCircle2 className="w-3.5 h-3.5" />, text: 'Alineado' },
-        review: { color: 'amber', icon: <AlertTriangle className="w-3.5 h-3.5" />, text: 'Revisar' },
-        unaligned: { color: 'red', icon: <X className="w-3.5 h-3.5" />, text: 'No alineado' },
-    };
-    const current = config[status];
-    return (
-        <div className="relative group">
-            <Badge color={current.color}>
-                {current.icon} {current.text}
-            </Badge>
-            <div className="absolute bottom-full mb-2 w-64 bg-zinc-800 text-white text-xs rounded-lg p-2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
-                {tooltip}
-            </div>
-        </div>
-    );
-}
-
-function ActividadesEditor({ plan, setPlan }: { plan: any; setPlan: (fn: any) => void }) {
-  function addBlank() {
-    const a = {
-      id: crypto.randomUUID(),
-      titulo: "Nueva actividad",
-      proposito: "",
-      instrucciones: "",
-      tiempo: 10,
-      recursos: [],
-      evidencia: "",
-    };
-    setPlan((p: any) => ({ ...p, actividades: [...p.actividades, a] }));
-  }
-  function update(id: string, patch: any) {
-    setPlan((p: any) => ({
-      ...p,
-      actividades: p.actividades.map((x: any) => (x.id === id ? { ...x, ...patch } : x)),
-    }));
-  }
-  function del(id: string) {
-    setPlan((p: any) => ({ ...p, actividades: p.actividades.filter((x: any) => x.id !== id) }));
-  }
-  return (
-    <SectionCard title="Secuencia didáctica" right={<button onClick={addBlank} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 flex items-center gap-2 transition-colors"><Plus className="w-4 h-4"/> Añadir actividad</button>}>
-      <div className="space-y-3">
-        {plan.actividades.map((a: any, idx: number) => {
-            const alignment = checkAlignment(plan.resultado.texto, a.evidencia);
+        // --- Formularios y componentes (sin cambios en su lógica interna) ---
+        // Se incluyen todas las funciones de formularios como ContextForm, ResultadosForm, etc.
+        // ... (el resto de los componentes de formulario van aquí, sin cambios)
+        function ContextForm({ plan, setPlan }) {
+            const handleChange = (field, value) => {
+                setPlan(p => ({ ...p, contexto: { ...p.contexto, [field]: value } }));
+            };
             return (
-          <div key={a.id} className="p-4 rounded-2xl border bg-white">
-            <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-3">
-              <input value={a.titulo} onChange={(e) => update(a.id, { titulo: e.target.value })} className="flex-1 rounded-xl border px-3 py-2 font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
-              <div className="flex items-center gap-2">
-                <Clock className="w-4 h-4 text-zinc-500"/>
-                <input type="number" min={1} value={a.tiempo} onChange={(e) => update(a.id, { tiempo: Number(e.target.value) })} className="w-20 rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/> min
-              </div>
-            </div>
-            <div className="grid md:grid-cols-2 gap-3">
-              <div>
-                <label className="text-sm font-medium text-zinc-600">Propósito</label>
-                <input value={a.proposito} onChange={(e) => update(a.id, { proposito: e.target.value })} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
-              </div>
-              <div>
-                <label className="text-sm font-medium text-zinc-600">Evidencia</label>
-                <input value={a.evidencia} onChange={(e) => update(a.id, { evidencia: e.target.value })} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
-                <p className="text-xs text-zinc-500 mt-1">Sugerencia: ¿Qué veré/escucharé/leeré si el logro se cumple?</p>
-              </div>
-              <div className="md:col-span-2">
-                <label className="text-sm font-medium text-zinc-600">Instrucciones (paso a paso)</label>
-                <textarea value={a.instrucciones} onChange={(e) => update(a.id, { instrucciones: e.target.value })} className="mt-1 w-full rounded-2xl border px-3 py-2 min-h-[80px] focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
-              </div>
-              <div className="md:col-span-2">
-                <label className="text-sm font-medium text-zinc-600">Recursos (separados por coma)</label>
-                <input value={(a.recursos || []).join(", ")} onChange={(e) => update(a.id, { recursos: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
-              </div>
-            </div>
-            <div className="flex items-center justify-between mt-3">
-              <AlignmentBadge status={alignment.status} tooltip={alignment.tooltip} />
-              <button onClick={() => del(a.id)} className="text-sm px-3 py-1.5 rounded-xl border hover:bg-red-50 hover:text-red-700 flex items-center gap-1.5 transition-colors"><Trash2 className="w-3.5 h-3.5"/> Eliminar</button>
-            </div>
-          </div>
-        )})}
-      </div>
-    </SectionCard>
-  );
-}
+                <SectionCard title="1) Contexto">
+                <div className="grid md:grid-cols-3 gap-4">
+                    <div>
+                    <label className="text-sm font-medium text-zinc-600">Nivel educativo</label>
+                    <select
+                        value={plan.contexto.nivel}
+                        onChange={(e) => handleChange('nivel', e.target.value)}
+                        className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    >
+                        {['Inicial','Primaria','Secundaria','Superior'].map((n) => <option key={n}>{n}</option>)}
+                    </select>
+                    </div>
+                    <div>
+                    <label className="text-sm font-medium text-zinc-600">Grado/curso</label>
+                    <input
+                        value={plan.contexto.grado}
+                        onChange={(e) => handleChange('grado', e.target.value)}
+                        className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                    </div>
+                    <div>
+                    <label className="text-sm font-medium text-zinc-600">Asignatura</label>
+                    <input
+                        value={plan.contexto.asignatura}
+                        onChange={(e) => handleChange('asignatura', e.target.value)}
+                        className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                    </div>
+                    <div>
+                    <label className="text-sm font-medium text-zinc-600">Duración (minutos)</label>
+                    <input
+                        type="number"
+                        min={10}
+                        value={plan.contexto.duracionMin}
+                        onChange={(e) => handleChange('duracionMin', Number(e.target.value))}
+                        className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                    </div>
+                    <div>
+                    <label className="text-sm font-medium text-zinc-600">Modalidad</label>
+                    <select
+                        value={plan.contexto.modalidad}
+                        onChange={(e) => handleChange('modalidad', e.target.value)}
+                        className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    >
+                        {['Presencial','Virtual','Mixta'].map((n) => <option key={n}>{n}</option>)}
+                    </select>
+                    </div>
+                    <div>
+                    <label className="text-sm font-medium text-zinc-600">N° estudiantes</label>
+                    <input
+                        type="number"
+                        min={1}
+                        value={plan.contexto.estudiantes}
+                        onChange={(e) => handleChange('estudiantes', Number(e.target.value))}
+                        className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                    </div>
+                </div>
+                </SectionCard>
+            );
+        }
 
-// --- Validador de Tiempos ---
-function TimeValidatorBanner({ plan, setPlan }) {
-    const totalMin = (plan.actividades || []).reduce((acc, a) => acc + (a.tiempo || 0), 0);
-    const plannedMin = plan.contexto.duracionMin || 0;
-    const diff = plannedMin - totalMin;
+        function ResultadosForm({ plan, setPlan }) {
+            const [verbo, setVerbo] = useState("");
+            useEffect(() => {
+                const verbs = BLOOM_VERBS[plan.resultado.nivelBloom] || [];
+                setVerbo(verbs[0] || "");
+            }, [plan.resultado.nivelBloom]);
 
-    const autoAdjust = () => {
-        if (totalMin === 0) return;
-        const ratio = plannedMin / totalMin;
-        setPlan(p => ({
-            ...p,
-            actividades: p.actividades.map(a => ({
-                ...a,
-                tiempo: Math.round(a.tiempo * ratio) || 1,
-            }))
-        }));
-    };
+            const handleChange = (field, value) => {
+                setPlan(p => ({ ...p, resultado: { ...p.resultado, [field]: value } }));
+            };
 
-    if (diff === 0) {
-        return (
-            <div className="p-3 rounded-2xl border bg-emerald-50 text-emerald-800 flex items-center gap-2 text-sm">
-                <CheckCircle2 className="w-5 h-5" />
-                <span>Los tiempos de las actividades coinciden con la duración total de la clase ({plannedMin} min).</span>
-            </div>
-        );
-    }
+            function generar() {
+                const v = verbo || (BLOOM_VERBS[plan.resultado.nivelBloom]?.[0] ?? "aplicar");
+                const c = plan.resultado.contenido || "contenido";
+                const criterio = plan.resultado.criterio || "mediante evidencia observable";
+                const texto = `Al finalizar la sesión, el estudiante será capaz de ${v} ${c} en situaciones propias del nivel, ${criterio}.`;
+                handleChange('texto', texto);
+            }
 
-    const message = diff > 0 ? `Te faltan ${diff} min para completar la duración de la clase.` : `Te sobran ${Math.abs(diff)} min de la duración de la clase.`;
-    
-    return (
-        <div className="p-3 rounded-2xl border bg-amber-50 text-amber-800 flex items-center gap-3 text-sm">
-            <AlertTriangle className="w-5 h-5 flex-shrink-0" />
-            <span className="flex-1">{message}</span>
-            <button onClick={autoAdjust} className="px-3 py-1.5 rounded-xl border border-amber-300 bg-white text-amber-900 hover:bg-amber-100 text-xs font-semibold transition-colors">
-                Auto-ajustar
-            </button>
-        </div>
-    );
-}
+            return (
+                <div className="space-y-4">
+                <SectionCard title="2) Resultado de aprendizaje" right={<Badge>Bloom + criterio</Badge>}>
+                    <div className="grid md:grid-cols-3 gap-4">
+                    <div>
+                        <label className="text-sm font-medium text-zinc-600">Nivel Bloom</label>
+                        <select
+                        value={plan.resultado.nivelBloom}
+                        onChange={(e) => handleChange('nivelBloom', e.target.value)}
+                        className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                        >
+                        {BLOOM_LEVELS.map((n) => <option key={n}>{n}</option>)}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="text-sm font-medium text-zinc-600">Verbo sugerido</label>
+                        <select value={verbo} onChange={(e) => setVerbo(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                        {(BLOOM_VERBS[plan.resultado.nivelBloom] || []).map((v) => <option key={v}>{v}</option>)}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="text-sm font-medium text-zinc-600">Contenido/tema</label>
+                        <input
+                        value={plan.resultado.contenido}
+                        onChange={(e) => handleChange('contenido', e.target.value)}
+                        className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                        placeholder="p. ej., fracciones, fotosíntesis"
+                        />
+                    </div>
+                    <div className="md:col-span-3">
+                        <label className="text-sm font-medium text-zinc-600">Criterio de logro (observable y medible)</label>
+                        <input
+                        value={plan.resultado.criterio}
+                        onChange={(e) => handleChange('criterio', e.target.value)}
+                        className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                        placeholder="p. ej., alcanzando nivel competente en la rúbrica"
+                        />
+                    </div>
+                    <div className="md:col-span-3">
+                        <label className="text-sm font-medium text-zinc-600">Resultado (auto-generado o manual)</label>
+                        <textarea
+                        value={plan.resultado.texto}
+                        onChange={(e) => handleChange('texto', e.target.value)}
+                        className="mt-1 w-full rounded-2xl border px-3 py-2 min-h-[100px] focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                        />
+                        <p className="text-xs text-zinc-500 mt-1">
+                            Sugerencia: Usa un verbo de Bloom y concreta la evidencia: ‘… alcanzando nivel competente en la rúbrica’.
+                        </p>
+                    </div>
+                    </div>
+                    <div className="mt-3 flex gap-2">
+                    <button onClick={generar} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 flex items-center gap-2 transition-colors"><Sparkles className="w-4 h-4"/> Generar</button>
+                    </div>
+                </SectionCard>
+                </div>
+            );
+        }
 
+        function ActividadesEditor({ plan, setPlan }) {
+            function addBlank() {
+                const a = {
+                id: crypto.randomUUID(),
+                titulo: "Nueva actividad",
+                proposito: "",
+                instrucciones: "",
+                tiempo: 10,
+                recursos: [],
+                evidencia: "",
+                };
+                setPlan((p) => ({ ...p, actividades: [...p.actividades, a] }));
+            }
+            function update(id, patch) {
+                setPlan((p) => ({
+                ...p,
+                actividades: p.actividades.map((x) => (x.id === id ? { ...x, ...patch } : x)),
+                }));
+            }
+            function del(id) {
+                setPlan((p) => ({ ...p, actividades: p.actividades.filter((x) => x.id !== id) }));
+            }
+            return (
+                <SectionCard title="Secuencia didáctica" right={<button onClick={addBlank} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 flex items-center gap-2 transition-colors"><Plus className="w-4 h-4"/> Añadir actividad</button>}>
+                <div className="space-y-3">
+                    {plan.actividades.map((a, idx) => {
+                        const alignment = checkAlignment(plan.resultado.texto, a.evidencia);
+                        return (
+                    <div key={a.id} className="p-4 rounded-2xl border bg-white">
+                        <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-3">
+                        <input value={a.titulo} onChange={(e) => update(a.id, { titulo: e.target.value })} className="flex-1 rounded-xl border px-3 py-2 font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+                        <div className="flex items-center gap-2">
+                            <Clock className="w-4 h-4 text-zinc-500"/>
+                            <input type="number" min={1} value={a.tiempo} onChange={(e) => update(a.id, { tiempo: Number(e.target.value) })} className="w-20 rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/> min
+                        </div>
+                        </div>
+                        <div className="grid md:grid-cols-2 gap-3">
+                        <div>
+                            <label className="text-sm font-medium text-zinc-600">Propósito</label>
+                            <input value={a.proposito} onChange={(e) => update(a.id, { proposito: e.target.value })} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+                        </div>
+                        <div>
+                            <label className="text-sm font-medium text-zinc-600">Evidencia</label>
+                            <input value={a.evidencia} onChange={(e) => update(a.id, { evidencia: e.target.value })} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+                            <p className="text-xs text-zinc-500 mt-1">Sugerencia: ¿Qué veré/escucharé/leeré si el logro se cumple?</p>
+                        </div>
+                        <div className="md:col-span-2">
+                            <label className="text-sm font-medium text-zinc-600">Instrucciones (paso a paso)</label>
+                            <textarea value={a.instrucciones} onChange={(e) => update(a.id, { instrucciones: e.target.value })} className="mt-1 w-full rounded-2xl border px-3 py-2 min-h-[80px] focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+                        </div>
+                        <div className="md:col-span-2">
+                            <label className="text-sm font-medium text-zinc-600">Recursos (separados por coma)</label>
+                            <input value={(a.recursos || []).join(", ")} onChange={(e) => update(a.id, { recursos: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+                        </div>
+                        </div>
+                        <div className="flex items-center justify-between mt-3">
+                        <AlignmentBadge status={alignment.status} tooltip={alignment.tooltip} />
+                        <button onClick={() => del(a.id)} className="text-sm px-3 py-1.5 rounded-xl border hover:bg-red-50 hover:text-red-700 flex items-center gap-1.5 transition-colors"><Trash2 className="w-3.5 h-3.5"/> Eliminar</button>
+                        </div>
+                    </div>
+                    )})}
+                </div>
+                </SectionCard>
+            );
+        }
 
-function EvaluacionForm({ plan, setPlan }: { plan: any; setPlan: (fn: any) => void }) {
-  const [newCrit, setNewCrit] = useState("");
-  function addCriterio() {
-    if (!newCrit.trim()) return;
-    const criterio = { id: crypto.randomUUID(), descripcion: newCrit.trim(), niveles: DEFAULT_RUBRIC_LEVELS };
-    setPlan((p: any) => ({ ...p, evaluacion: { ...p.evaluacion, instrumento: "Rúbrica", criterios: [...(p.evaluacion.criterios || []), criterio] } }));
-    setNewCrit("");
-  }
-  function updateCrit(id: string, patch: any) {
-    setPlan((p: any) => ({
-      ...p,
-      evaluacion: {
-        ...p.evaluacion,
-        criterios: p.evaluacion.criterios.map((c: any) => (c.id === id ? { ...c, ...patch } : c)),
-      },
-    }));
-  }
-  function delCrit(id: string) {
-    setPlan((p: any) => ({
-      ...p,
-      evaluacion: { ...p.evaluacion, criterios: p.evaluacion.criterios.filter((c: any) => c.id !== id) },
-    }));
-  }
-  return (
-    <div className="space-y-4">
-      <SectionCard title="4) Evaluación auténtica" right={<Badge>Rúbrica 4 niveles</Badge>}>
-        <div className="grid md:grid-cols-2 gap-3">
-          <div>
-            <label className="text-sm font-medium text-zinc-600">Instrumento</label>
-            <select value={plan.evaluacion.instrumento} onChange={(e) => setPlan((p: any) => ({ ...p, evaluacion: { ...p.evaluacion, instrumento: e.target.value } }))} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none">
-              {['Rúbrica','Lista de cotejo','Escala descriptiva'].map((x) => <option key={x}>{x}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="text-sm font-medium text-zinc-600">Añadir criterio</label>
-            <div className="mt-1 flex gap-2">
-              <input value={newCrit} onChange={(e) => setNewCrit(e.target.value)} className="flex-1 rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="p. ej., Claridad conceptual"/>
-              <button onClick={addCriterio} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 transition-colors">Añadir</button>
-            </div>
-          </div>
-        </div>
+        function TimeValidatorBanner({ plan, setPlan }) {
+            const totalMin = (plan.actividades || []).reduce((acc, a) => acc + (a.tiempo || 0), 0);
+            const plannedMin = plan.contexto.duracionMin || 0;
+            const diff = plannedMin - totalMin;
 
-        <div className="mt-4 space-y-3">
-          {(plan.evaluacion.criterios || []).map((c: any) => (
-            <div key={c.id} className="p-4 rounded-2xl border bg-white">
-              <div className="flex items-center gap-2 mb-2">
-                <input value={c.descripcion} onChange={(e) => updateCrit(c.id, { descripcion: e.target.value })} className="flex-1 rounded-xl border px-3 py-2 font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
-                <button onClick={() => delCrit(c.id)} className="text-sm px-3 py-1.5 rounded-xl border hover:bg-red-50 hover:text-red-700 flex items-center gap-1.5 transition-colors"><Trash2 className="w-3.5 h-3.5"/> Eliminar</button>
-              </div>
-              <div className="grid md:grid-cols-4 gap-2">
-                {c.niveles.map((n: string, idx: number) => (
-                  <input key={idx} value={n} onChange={(e) => updateCrit(c.id, { niveles: c.niveles.map((x: string, j: number) => (j === idx ? e.target.value : x)) })} className="rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      </SectionCard>
-    </div>
-  );
-}
+            const autoAdjust = () => {
+                if (totalMin === 0) return;
+                const ratio = plannedMin / totalMin;
+                setPlan(p => ({
+                    ...p,
+                    actividades: p.actividades.map(a => ({
+                        ...a,
+                        tiempo: Math.round(a.tiempo * ratio) || 1,
+                    }))
+                }));
+            };
 
-function RecursosForm({ plan, setPlan }: { plan: any; setPlan: (fn: any) => void }) {
-  const [nombre, setNombre] = useState("");
-  const [url, setUrl] = useState("");
-  function add() {
-    if (!nombre.trim()) return;
-    const r = { id: crypto.randomUUID(), tipo: url ? "link" : "otro", nombre: nombre.trim(), url: url.trim() };
-    setPlan((p: any) => ({ ...p, recursos: [...(p.recursos || []), r] }));
-    setNombre("");
-    setUrl("");
-  }
-  function del(id: string) {
-    setPlan((p: any) => ({ ...p, recursos: p.recursos.filter((x: any) => x.id !== id) }));
-  }
-  return (
-    <SectionCard title="5) Recursos">
-      <div className="grid md:grid-cols-3 gap-3">
-        <div className="md:col-span-2">
-          <label className="text-sm font-medium text-zinc-600">Nombre</label>
-          <input value={nombre} onChange={(e) => setNombre(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="p. ej., Ficha de trabajo sesión 1"/>
-        </div>
-        <div>
-          <label className="text-sm font-medium text-zinc-600">URL (opcional)</label>
-          <input value={url} onChange={(e) => setUrl(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="https://..."/>
-        </div>
-      </div>
-      <div className="mt-3">
-        <button onClick={add} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 transition-colors">Añadir recurso</button>
-      </div>
+            if (diff === 0) {
+                return (
+                    <div className="p-3 rounded-2xl border bg-emerald-50 text-emerald-800 flex items-center gap-2 text-sm">
+                        <CheckCircle2 className="w-5 h-5" />
+                        <span>Los tiempos de las actividades coinciden con la duración total de la clase ({plannedMin} min).</span>
+                    </div>
+                );
+            }
 
-      <div className="mt-4 grid sm:grid-cols-2 gap-3">
-        {(plan.recursos || []).map((r: any) => (
-          <div key={r.id} className="p-4 rounded-2xl border bg-white flex items-center justify-between">
-            <div>
-                <div className="font-medium">{r.nombre}</div>
-                {r.url && <a className="text-xs text-blue-600 underline" href={r.url} target="_blank" rel="noreferrer">{r.url}</a>}
-            </div>
-            <button onClick={() => del(r.id)} className="text-sm p-2 rounded-xl border hover:bg-red-50 hover:text-red-700 transition-colors"><Trash2 className="w-3.5 h-3.5"/></button>
-          </div>
-        ))}
-      </div>
-    </SectionCard>
-  );
-}
+            const message = diff > 0 ? `Te faltan ${diff} min para completar la duración de la clase.` : `Te sobran ${Math.abs(diff)} min de la duración de la clase.`;
+            
+            return (
+                <div className="p-3 rounded-2xl border bg-amber-50 text-amber-800 flex items-center gap-3 text-sm">
+                    <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+                    <span className="flex-1">{message}</span>
+                    <button onClick={autoAdjust} className="px-3 py-1.5 rounded-xl border border-amber-300 bg-white text-amber-900 hover:bg-amber-100 text-xs font-semibold transition-colors">
+                        Auto-ajustar
+                    </button>
+                </div>
+            );
+        }
 
-function CronogramaForm({ plan, setPlan }: { plan: any; setPlan: (fn: any) => void }) {
-  const [fecha, setFecha] = useState("");
-  const [inicio, setInicio] = useState("");
-  const [fin, setFin] = useState("");
-  function add() {
-    if (!fecha || !inicio || !fin) return;
-    const c = { id: crypto.randomUUID(), fecha, bloque: `${inicio}-${fin}` };
-    setPlan((p: any) => ({ ...p, cronograma: [...(p.cronograma || []), c] }));
-    setFecha(""); setInicio(""); setFin("");
-  }
-  function del(id: string) {
-    setPlan((p: any) => ({ ...p, cronograma: p.cronograma.filter((x: any) => x.id !== id) }));
-  }
-  return (
-    <SectionCard title="6) Cronograma">
-      <div className="grid md:grid-cols-3 gap-3">
-        <div>
-          <label className="text-sm font-medium text-zinc-600">Fecha</label>
-          <input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
-        </div>
-        <div>
-          <label className="text-sm font-medium text-zinc-600">Inicio</label>
-          <input type="time" value={inicio} onChange={(e) => setInicio(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
-        </div>
-        <div>
-          <label className="text-sm font-medium text-zinc-600">Fin</label>
-          <input type="time" value={fin} onChange={(e) => setFin(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
-        </div>
-      </div>
-      <div className="mt-3"><button onClick={add} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 transition-colors">Añadir bloque</button></div>
+        function EvaluacionForm({ plan, setPlan }) {
+            const [newCrit, setNewCrit] = useState("");
+            function addCriterio() {
+                if (!newCrit.trim()) return;
+                const criterio = { id: crypto.randomUUID(), descripcion: newCrit.trim(), niveles: DEFAULT_RUBRIC_LEVELS };
+                setPlan((p) => ({ ...p, evaluacion: { ...p.evaluacion, instrumento: "Rúbrica", criterios: [...(p.evaluacion.criterios || []), criterio] } }));
+                setNewCrit("");
+            }
+            function updateCrit(id, patch) {
+                setPlan((p) => ({
+                ...p,
+                evaluacion: {
+                    ...p.evaluacion,
+                    criterios: p.evaluacion.criterios.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+                },
+                }));
+            }
+            function delCrit(id) {
+                setPlan((p) => ({
+                ...p,
+                evaluacion: { ...p.evaluacion, criterios: p.evaluacion.criterios.filter((c) => c.id !== id) },
+                }));
+            }
+            return (
+                <div className="space-y-4">
+                <SectionCard title="4) Evaluación auténtica" right={<Badge>Rúbrica 4 niveles</Badge>}>
+                    <div className="grid md:grid-cols-2 gap-3">
+                    <div>
+                        <label className="text-sm font-medium text-zinc-600">Instrumento</label>
+                        <select value={plan.evaluacion.instrumento} onChange={(e) => setPlan((p) => ({ ...p, evaluacion: { ...p.evaluacion, instrumento: e.target.value } }))} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                        {['Rúbrica','Lista de cotejo','Escala descriptiva'].map((x) => <option key={x}>{x}</option>)}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="text-sm font-medium text-zinc-600">Añadir criterio</label>
+                        <div className="mt-1 flex gap-2">
+                        <input value={newCrit} onChange={(e) => setNewCrit(e.target.value)} className="flex-1 rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="p. ej., Claridad conceptual"/>
+                        <button onClick={addCriterio} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 transition-colors">Añadir</button>
+                        </div>
+                    </div>
+                    </div>
 
-      <div className="mt-4 space-y-2">
-        {(plan.cronograma || []).map((c: any) => (
-          <div key={c.id} className="p-3 rounded-xl border bg-white flex items-center justify-between">
-            <div>
-              <div className="font-medium">{c.fecha}</div>
-              <div className="text-sm text-zinc-600">{c.bloque}</div>
-            </div>
-            <button onClick={() => del(c.id)} className="text-sm p-2 rounded-xl border hover:bg-red-50 hover:text-red-700 transition-colors"><Trash2 className="w-3.5 h-3.5"/></button>
-          </div>
-        ))}
-      </div>
-    </SectionCard>
-  );
-}
+                    <div className="mt-4 space-y-3">
+                    {(plan.evaluacion.criterios || []).map((c) => (
+                        <div key={c.id} className="p-4 rounded-2xl border bg-white">
+                        <div className="flex items-center gap-2 mb-2">
+                            <input value={c.descripcion} onChange={(e) => updateCrit(c.id, { descripcion: e.target.value })} className="flex-1 rounded-xl border px-3 py-2 font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+                            <button onClick={() => delCrit(c.id)} className="text-sm px-3 py-1.5 rounded-xl border hover:bg-red-50 hover:text-red-700 flex items-center gap-1.5 transition-colors"><Trash2 className="w-3.5 h-3.5"/> Eliminar</button>
+                        </div>
+                        <div className="grid md:grid-cols-4 gap-2">
+                            {c.niveles.map((n, idx) => (
+                            <input key={idx} value={n} onChange={(e) => updateCrit(c.id, { niveles: c.niveles.map((x, j) => (j === idx ? e.target.value : x)) })} className="rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+                            ))}
+                        </div>
+                        </div>
+                    ))}
+                    </div>
+                </SectionCard>
+                </div>
+            );
+        }
 
-function InclusionForm({ plan, setPlan }: { plan: any; setPlan: (fn: any) => void }) {
-  const [text, setText] = useState("");
-  function add() {
-    if (!text.trim()) return;
-    setPlan((p: any) => ({ ...p, inclusion: { ...p.inclusion, adaptaciones: [...(p.inclusion?.adaptaciones || []), text.trim()] } }));
-    setText("");
-  }
-  function del(ix: number) {
-    setPlan((p: any) => ({ ...p, inclusion: { ...p.inclusion, adaptaciones: p.inclusion.adaptaciones.filter((_: any, i: number) => i !== ix) } }));
-  }
-  return (
-    <SectionCard title="7) Inclusión & adaptaciones">
-      <div className="grid md:grid-cols-3 gap-3">
-        <div className="md:col-span-2">
-          <label className="text-sm font-medium text-zinc-600">Sugerencia / ajuste</label>
-          <input value={text} onChange={(e) => setText(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="p. ej., Lectura fácil y apoyos visuales"/>
-        </div>
-        <div className="flex items-end">
-          <button onClick={add} className="w-full px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 transition-colors">Añadir</button>
-        </div>
-      </div>
-       <p className="text-xs text-zinc-500 mt-2">Sugerencia: Añade un apoyo mínimo para acceso (lectura fácil) y uno para expresión (respuesta oral/escrita).</p>
-      <div className="mt-4 grid sm:grid-cols-2 gap-3">
-        {(plan.inclusion?.adaptaciones || []).map((a: string, i: number) => (
-          <div key={i} className="p-3 rounded-xl border bg-white flex items-center justify-between">
-            <div className="text-sm">{a}</div>
-            <button onClick={() => del(i)} className="text-sm p-2 rounded-xl border hover:bg-red-50 hover:text-red-700 transition-colors"><Trash2 className="w-3.5 h-3.5"/></button>
-          </div>
-        ))}
-      </div>
-    </SectionCard>
-  );
-}
+        function RecursosForm({ plan, setPlan }) {
+            const [nombre, setNombre] = useState("");
+            const [url, setUrl] = useState("");
+            function add() {
+                if (!nombre.trim()) return;
+                const r = { id: crypto.randomUUID(), tipo: url ? "link" : "otro", nombre: nombre.trim(), url: url.trim() };
+                setPlan((p) => ({ ...p, recursos: [...(p.recursos || []), r] }));
+                setNombre("");
+                setUrl("");
+            }
+            function del(id) {
+                setPlan((p) => ({ ...p, recursos: p.recursos.filter((x) => x.id !== id) }));
+            }
+            return (
+                <SectionCard title="5) Recursos">
+                <div className="grid md:grid-cols-3 gap-3">
+                    <div className="md:col-span-2">
+                    <label className="text-sm font-medium text-zinc-600">Nombre</label>
+                    <input value={nombre} onChange={(e) => setNombre(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="p. ej., Ficha de trabajo sesión 1"/>
+                    </div>
+                    <div>
+                    <label className="text-sm font-medium text-zinc-600">URL (opcional)</label>
+                    <input value={url} onChange={(e) => setUrl(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="https://..."/>
+                    </div>
+                </div>
+                <div className="mt-3">
+                    <button onClick={add} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 transition-colors">Añadir recurso</button>
+                </div>
 
-function ResumenExport({ plan, onExport }: { plan: any; onExport: () => void }) {
-  const totalMin = (plan.actividades || []).reduce((acc: number, a: any) => acc + (a.tiempo || 0), 0);
-  return (
-    <div className="space-y-4">
-      <SectionCard title="8) Resumen del plan" right={<Badge>Listo para exportar</Badge>}>
-        <TimeValidatorBanner plan={plan} setPlan={() => {}} />
-        <div className="grid md:grid-cols-2 gap-4 mt-4">
-          <div className="bg-zinc-50 rounded-2xl p-4">
-            <h4 className="font-medium mb-2">Contexto</h4>
-            <ul className="text-sm text-zinc-700 space-y-1">
-              <li><strong>Nivel:</strong> {plan.contexto.nivel}</li>
-              <li><strong>Grado/curso:</strong> {plan.contexto.grado}</li>
-              <li><strong>Asignatura:</strong> {plan.contexto.asignatura}</li>
-              <li><strong>Duración:</strong> {plan.contexto.duracionMin} min (actividades suman {totalMin} min)</li>
-              <li><strong>Modalidad:</strong> {plan.contexto.modalidad}</li>
-              <li><strong>Estudiantes:</strong> {plan.contexto.estudiantes}</li>
-            </ul>
-          </div>
-          <div className="bg-zinc-50 rounded-2xl p-4">
-            <h4 className="font-medium mb-2">Resultado de aprendizaje</h4>
-            <div className="text-sm text-zinc-700">{plan.resultado.texto}</div>
-          </div>
-          <div className="bg-zinc-50 rounded-2xl p-4 md:col-span-2">
-            <h4 className="font-medium mb-2">Secuencia</h4>
-            <ol className="space-y-2 list-decimal pl-5">
-              {plan.actividades.map((a: any, i: number) => (
-                <li key={a.id} className="text-sm">
-                  <span className="font-medium">{a.titulo}</span> — {a.tiempo} min
-                  <div className="text-zinc-600">{a.proposito}</div>
-                </li>
-              ))}
-            </ol>
-          </div>
-          <div className="bg-zinc-50 rounded-2xl p-4 md:col-span-2">
-            <h4 className="font-medium mb-2">Evaluación</h4>
-            <div className="text-sm">Instrumento: {plan.evaluacion.instrumento}</div>
-            <ul className="text-sm list-disc pl-5 mt-2">
-              {(plan.evaluacion.criterios || []).map((c: any) => (<li key={c.id}>{c.descripcion}</li>))}
-            </ul>
-          </div>
-        </div>
-        <div className="mt-4 flex gap-2">
-          <button onClick={onExport} className="px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 flex items-center gap-2 transition-colors"><Download className="w-4 h-4"/> Descargar JSON</button>
-          <button onClick={() => window.print()} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 transition-colors">Imprimir</button>
-        </div>
-      </SectionCard>
-    </div>
-  );
-}
+                <div className="mt-4 grid sm:grid-cols-2 gap-3">
+                    {(plan.recursos || []).map((r) => (
+                    <div key={r.id} className="p-4 rounded-2xl border bg-white flex items-center justify-between">
+                        <div>
+                            <div className="font-medium">{r.nombre}</div>
+                            {r.url && <a className="text-xs text-blue-600 underline" href={r.url} target="_blank" rel="noreferrer">{r.url}</a>}
+                        </div>
+                        <button onClick={() => del(r.id)} className="text-sm p-2 rounded-xl border hover:bg-red-50 hover:text-red-700 transition-colors"><Trash2 className="w-3.5 h-3.5"/></button>
+                    </div>
+                    ))}
+                </div>
+                </SectionCard>
+            );
+        }
+
+        function CronogramaForm({ plan, setPlan }) {
+            const [fecha, setFecha] = useState("");
+            const [inicio, setInicio] = useState("");
+            const [fin, setFin] = useState("");
+            function add() {
+                if (!fecha || !inicio || !fin) return;
+                const c = { id: crypto.randomUUID(), fecha, bloque: `${inicio}-${fin}` };
+                setPlan((p) => ({ ...p, cronograma: [...(p.cronograma || []), c] }));
+                setFecha(""); setInicio(""); setFin("");
+            }
+            function del(id) {
+                setPlan((p) => ({ ...p, cronograma: p.cronograma.filter((x) => x.id !== id) }));
+            }
+            return (
+                <SectionCard title="6) Cronograma">
+                <div className="grid md:grid-cols-3 gap-3">
+                    <div>
+                    <label className="text-sm font-medium text-zinc-600">Fecha</label>
+                    <input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+                    </div>
+                    <div>
+                    <label className="text-sm font-medium text-zinc-600">Inicio</label>
+                    <input type="time" value={inicio} onChange={(e) => setInicio(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+                    </div>
+                    <div>
+                    <label className="text-sm font-medium text-zinc-600">Fin</label>
+                    <input type="time" value={fin} onChange={(e) => setFin(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+                    </div>
+                </div>
+                <div className="mt-3"><button onClick={add} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 transition-colors">Añadir bloque</button></div>
+
+                <div className="mt-4 space-y-2">
+                    {(plan.cronograma || []).map((c) => (
+                    <div key={c.id} className="p-3 rounded-xl border bg-white flex items-center justify-between">
+                        <div>
+                        <div className="font-medium">{c.fecha}</div>
+                        <div className="text-sm text-zinc-600">{c.bloque}</div>
+                        </div>
+                        <button onClick={() => del(c.id)} className="text-sm p-2 rounded-xl border hover:bg-red-50 hover:text-red-700 transition-colors"><Trash2 className="w-3.5 h-3.5"/></button>
+                    </div>
+                    ))}
+                </div>
+                </SectionCard>
+            );
+        }
+
+        function InclusionForm({ plan, setPlan }) {
+            const [text, setText] = useState("");
+            function add() {
+                if (!text.trim()) return;
+                setPlan((p) => ({ ...p, inclusion: { ...p.inclusion, adaptaciones: [...(p.inclusion?.adaptaciones || []), text.trim()] } }));
+                setText("");
+            }
+            function del(ix) {
+                setPlan((p) => ({ ...p, inclusion: { ...p.inclusion, adaptaciones: p.inclusion.adaptaciones.filter((_, i) => i !== ix) } }));
+            }
+            return (
+                <SectionCard title="7) Inclusión & adaptaciones">
+                <div className="grid md:grid-cols-3 gap-3">
+                    <div className="md:col-span-2">
+                    <label className="text-sm font-medium text-zinc-600">Sugerencia / ajuste</label>
+                    <input value={text} onChange={(e) => setText(e.target.value)} className="mt-1 w-full rounded-xl border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="p. ej., Lectura fácil y apoyos visuales"/>
+                    </div>
+                    <div className="flex items-end">
+                    <button onClick={add} className="w-full px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 transition-colors">Añadir</button>
+                    </div>
+                </div>
+                <p className="text-xs text-zinc-500 mt-2">Sugerencia: Añade un apoyo mínimo para acceso (lectura fácil) y uno para expresión (respuesta oral/escrita).</p>
+                <div className="mt-4 grid sm:grid-cols-2 gap-3">
+                    {(plan.inclusion?.adaptaciones || []).map((a, i) => (
+                    <div key={i} className="p-3 rounded-xl border bg-white flex items-center justify-between">
+                        <div className="text-sm">{a}</div>
+                        <button onClick={() => del(i)} className="text-sm p-2 rounded-xl border hover:bg-red-50 hover:text-red-700 transition-colors"><Trash2 className="w-3.5 h-3.5"/></button>
+                    </div>
+                    ))}
+                </div>
+                </SectionCard>
+            );
+        }
+
+        function ResumenExport({ plan, onExport }) {
+            const totalMin = (plan.actividades || []).reduce((acc, a) => acc + (a.tiempo || 0), 0);
+            return (
+                <div className="space-y-4">
+                <SectionCard title="8) Resumen del plan" right={<Badge>Listo para exportar</Badge>}>
+                    <TimeValidatorBanner plan={plan} setPlan={() => {}} />
+                    <div className="grid md:grid-cols-2 gap-4 mt-4">
+                    <div className="bg-zinc-50 rounded-2xl p-4">
+                        <h4 className="font-medium mb-2">Contexto</h4>
+                        <ul className="text-sm text-zinc-700 space-y-1">
+                        <li><strong>Nivel:</strong> {plan.contexto.nivel}</li>
+                        <li><strong>Grado/curso:</strong> {plan.contexto.grado}</li>
+                        <li><strong>Asignatura:</strong> {plan.contexto.asignatura}</li>
+                        <li><strong>Duración:</strong> {plan.contexto.duracionMin} min (actividades suman {totalMin} min)</li>
+                        <li><strong>Modalidad:</strong> {plan.contexto.modalidad}</li>
+                        <li><strong>Estudiantes:</strong> {plan.contexto.estudiantes}</li>
+                        </ul>
+                    </div>
+                    <div className="bg-zinc-50 rounded-2xl p-4">
+                        <h4 className="font-medium mb-2">Resultado de aprendizaje</h4>
+                        <div className="text-sm text-zinc-700">{plan.resultado.texto}</div>
+                    </div>
+                    <div className="bg-zinc-50 rounded-2xl p-4 md:col-span-2">
+                        <h4 className="font-medium mb-2">Secuencia</h4>
+                        <ol className="space-y-2 list-decimal pl-5">
+                        {plan.actividades.map((a, i) => (
+                            <li key={a.id} className="text-sm">
+                            <span className="font-medium">{a.titulo}</span> — {a.tiempo} min
+                            <div className="text-zinc-600">{a.proposito}</div>
+                            </li>
+                        ))}
+                        </ol>
+                    </div>
+                    <div className="bg-zinc-50 rounded-2xl p-4 md:col-span-2">
+                        <h4 className="font-medium mb-2">Evaluación</h4>
+                        <div className="text-sm">Instrumento: {plan.evaluacion.instrumento}</div>
+                        <ul className="text-sm list-disc pl-5 mt-2">
+                        {(plan.evaluacion.criterios || []).map((c) => (<li key={c.id}>{c.descripcion}</li>))}
+                        </ul>
+                    </div>
+                    </div>
+                    <div className="mt-4 flex gap-2">
+                    <button onClick={onExport} className="px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 flex items-center gap-2 transition-colors"><Download className="w-4 h-4"/> Descargar JSON</button>
+                    <button onClick={() => window.print()} className="px-3 py-2 rounded-xl border bg-white hover:bg-zinc-50 transition-colors">Imprimir</button>
+                    </div>
+                </SectionCard>
+                </div>
+            );
+        }
+
+        // --- Mount the App ---
+        const container = document.getElementById('root');
+        const root = ReactDOM.createRoot(container);
+        root.render(<LessonPlannerDemo />);
+
+    </script>
+</body>
+</html>
